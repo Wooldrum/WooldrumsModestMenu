@@ -26,3 +26,6 @@ Desktop.ini
 
 # NuGet (if ever used at root)
 packages/
+
+# Release artifacts (distributable zips built from this repo)
+WooldrumsModestMenu*.zip
