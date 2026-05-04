@@ -21,7 +21,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.wooldrum.modestmenu";
     public const string PluginName = "Wooldrum's Modest Menu";
-    public const string PluginVersion = "0.0.1";
+    public const string PluginVersion = "0.0.2";
 
     internal static ManualLogSource LogSource = null!;
 
@@ -75,6 +75,30 @@ public sealed class Plugin : BasePlugin
                     harmony,
                     target,
                     postfix: AccessTools.Method(typeof(HandAvailabilityColorPatch), nameof(HandAvailabilityColorPatch.Postfix)),
+                    label: $"{target.DeclaringType?.FullName}.{target.Name}");
+            }
+
+            foreach (var target in GarageGrabberAvailabilityRefreshPatch.ResolveTargets())
+            {
+                TryPatch(
+                    harmony,
+                    target,
+                    postfix: AccessTools.Method(typeof(GarageGrabberAvailabilityRefreshPatch), nameof(GarageGrabberAvailabilityRefreshPatch.Postfix)),
+                    label: $"{target.DeclaringType?.FullName}.{target.Name}");
+            }
+
+            TryPatch(
+                harmony,
+                UIInventorySetAvailablePatch.ResolveTarget(),
+                prefix: AccessTools.Method(typeof(UIInventorySetAvailablePatch), nameof(UIInventorySetAvailablePatch.Prefix)),
+                label: "UIInventoryListItem.SetAvailableComponents");
+
+            foreach (var target in UIInventoryAvailabilityColorPatch.ResolveTargets())
+            {
+                TryPatch(
+                    harmony,
+                    target,
+                    postfix: AccessTools.Method(typeof(UIInventoryAvailabilityColorPatch), nameof(UIInventoryAvailabilityColorPatch.Postfix)),
                     label: $"{target.DeclaringType?.FullName}.{target.Name}");
             }
 
@@ -166,7 +190,7 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
     internal const int UnlimitedAvailableAmount = 999999;
     public const string MenuOpenHint =
         "F8 to open and close. Other players shouldn't need this.\n"
-        + "If they don't have unlimited items, refresh co-op cap, kick them, then reinvite them.";
+        + "If co-op caps look desynced, use Refresh Co-op Caps.";
     private const int ListViewportRows = 16;
     private static readonly string[] ScanTabs = { "Garage", "World" };
 
@@ -181,14 +205,19 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
     private int _teleportCount = 25;
     private string _status = "Loading…";
     private float _nextCapRefreshAt;
-    private float _nextClientProbeAt;
     private float _nextAvailabilityReplayAt;
-    private float _nextAvailabilityHeartbeatAt;
     private float _nextPlayerFeatureApplyAt;
     private float _nextPlayerFeatureBroadcastAt;
     private float _nextPlayerScanAt;
     private float _nextCoreStampAt;
-    private int _lastOnlineClientCount = -1;
+    private float _nextPlacementAvailabilityRefreshAt;
+    // R is held to load into a world. ScanItems stamps every world instance, which is what
+    // makes the refresh actually stick (without it, the cap snaps back to red on placement).
+    private float _rHoldStartedAt;
+    private float _rHoldScanScheduledAt;
+    private float _rHoldRefreshScheduledAt;
+    private bool _rHoldScanDone;
+    private bool _rHoldRefreshDone;
     private int _lastPlayerCount = -1;
     private int _pendingAvailabilityReplays;
     private bool _initialOpenScansDone;
@@ -198,10 +227,17 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
     // "No static" bortplockad — gäster räknar GPU-sidan själva. Toggle → TryApplyNoStatic när du orkar.
     private bool _noStatic;
     private bool _noStaticNotImplementedLogged;
+    // No Wind is a TODO; host-only ECS write doesn't propagate to guests.
+    private bool _noWindNotImplementedLogged;
+
+    // After a guest joins, we replay broadcasts at ~0.5 s for a few seconds — covers the join
+    // handshake race where the first broadcast lands before the client is ready.
+    private float _fastBroadcastWindowEndsAt;
 
     private static MethodInfo? _findObjectsOfTypeAll;
     private static MethodInfo? _findObjectsOfTypeAllAttempted;
     private static MethodInfo? _il2cppTypeFrom;
+    private static ModestMenuBehaviour? _instance;
     private static readonly Dictionary<Type, List<MemberInfo>> PrefabMemberCache = new();
     private static readonly HashSet<string> LoggedMissingOptionalTypes = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, string> EpcDisplayNames = new(StringComparer.Ordinal)
@@ -211,6 +247,17 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
     };
     /// IL2CPP: <see cref="GUIContent.none"/> finns inte alltid.
     private static readonly GUIContent EmptyGroupContent = new GUIContent("");
+
+    private void Awake()
+    {
+        _instance = this;
+    }
+
+    private void OnDestroy()
+    {
+        if (ReferenceEquals(_instance, this))
+            _instance = null;
+    }
 
     private void Update()
     {
@@ -232,18 +279,17 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
 
         if (now >= _nextCapRefreshAt)
         {
-            _nextCapRefreshAt = now + 2f;
+            _nextCapRefreshAt = now + 8f;
             TryRefreshLoadedComponentCaps();
         }
 
         TryProcessAvailabilityReplay();
         TryAutoScanPlayers(now);
-        TryCoopAvailabilityHeartbeat(now);
+        TryProcessRHoldRefresh(now);
 
         if (now >= _nextCoreStampAt)
         {
-            // Unlimited direkt när map skapas — annars första gästen får spar-filens gamla värden tills rejoin.
-            _nextCoreStampAt = now + 1f;
+            _nextCoreStampAt = now + 2f;
             try
             {
                 var core = GetCoreInstance();
@@ -285,18 +331,81 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
             var newCount = TryCountPlayers();
             _lastPlayerCount = newCount;
 
-            // Fire om count hoppar över max(0, prev) — täcker ny spelare OCH första load in i värld (gammal kod missade det).
-            if (newCount > Math.Max(0, prevCount))
+            // Guest joined — open the dense-replay window. Host's own world-entry refresh is
+            // handled by the R-hold trigger.
+            if (newCount > Math.Max(0, prevCount) && newCount > 1)
             {
-                Plugin.LogSource.LogInfo($"Player count rose ({prevCount}->{newCount}); auto-refreshing co-op caps.");
-                RefreshAvailabilityUiAndCore(updateStatus: false);
-                ScheduleAvailabilityReplayBurst(8);
-                _nextAvailabilityHeartbeatAt = Math.Min(_nextAvailabilityHeartbeatAt <= 0f ? float.MaxValue : _nextAvailabilityHeartbeatAt, now + 4f);
+                Plugin.LogSource.LogInfo($"Player count rose ({prevCount}->{newCount}); opening co-op fast-broadcast window.");
+                _fastBroadcastWindowEndsAt = now + 8f;
+                ScheduleAvailabilityReplayBurst(16);
             }
         }
         catch (Exception ex)
         {
             Plugin.LogSource.LogWarning("Auto player scan failed: " + ex.Message);
+        }
+    }
+
+    [HideFromIl2Cpp]
+    private void TryProcessRHoldRefresh(float now)
+    {
+        if (_rHoldRefreshDone)
+            return;
+
+        if (!_rHoldScanDone && _rHoldScanScheduledAt > 0f && now >= _rHoldScanScheduledAt)
+        {
+            _rHoldScanDone = true;
+            try
+            {
+                Plugin.LogSource.LogInfo("R-hold scan timer fired; running ScanItems.");
+                ScanItems();
+                // Suppress the F8 first-open scan so the menu doesn't hitch.
+                _initialOpenScansDone = true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource.LogWarning("R-hold auto-scan threw: " + ex.Message);
+            }
+        }
+
+        if (_rHoldRefreshScheduledAt > 0f && now >= _rHoldRefreshScheduledAt)
+        {
+            _rHoldRefreshScheduledAt = 0f;
+            _rHoldRefreshDone = true;
+            try
+            {
+                Plugin.LogSource.LogInfo("R-hold refresh timer fired; auto-refreshing co-op caps.");
+                RefreshAvailabilityUiAndCore(updateStatus: false);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource.LogWarning("R-hold auto-refresh threw: " + ex.Message);
+            }
+            return;
+        }
+
+        // Once armed, stop polling R until the timers fire.
+        if (_rHoldRefreshScheduledAt > 0f)
+            return;
+
+        if (Input.GetKey(KeyCode.R))
+        {
+            if (_rHoldStartedAt <= 0f)
+            {
+                _rHoldStartedAt = now;
+                Plugin.LogSource.LogInfo("R press detected; starting hold timer.");
+            }
+
+            if ((now - _rHoldStartedAt) >= 0.3f)
+            {
+                _rHoldScanScheduledAt = now + 2f;
+                _rHoldRefreshScheduledAt = now + 4f;
+                Plugin.LogSource.LogInfo("R held >=0.3 s; scheduling auto ScanItems in 2 s and Refresh Co-op Caps in 4 s.");
+            }
+        }
+        else
+        {
+            _rHoldStartedAt = 0f;
         }
     }
 
@@ -447,9 +556,9 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
     private void DrawFeatureControls(float x, float featureRowY, float w)
     {
         var changedToggle = false;
-        changedToggle |= UpdateToggle(new Rect(x + 14, featureRowY, 130, 24), ref _noPlayerWind, "No Wind");
+        changedToggle |= UpdateToggle(new Rect(x + 14, featureRowY, 160, 24), ref _noPlayerWind, "No Wind (TODO)");
         // No static TODO — bara stub, se TryApplyNoStatic.
-        changedToggle |= UpdateToggle(new Rect(x + 154, featureRowY, 170, 24), ref _noStatic, "No Static (TODO)");
+        changedToggle |= UpdateToggle(new Rect(x + 184, featureRowY, 170, 24), ref _noStatic, "No Static (TODO)");
 
         if (changedToggle)
         {
@@ -1735,7 +1844,7 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
     }
 
     [HideFromIl2Cpp]
-    private static int TryCountOnlineNetcoreClients()
+    internal static int TryCountOnlineNetcoreClients()
     {
         var clientType = FindType("NetcoreClient");
         var ncSingletonType = FindType("Netcore+Singleton") ?? FindType("Netcore.Singleton") ?? FindType("Netcore/Singleton");
@@ -1817,8 +1926,12 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
 
                 if (_noPlayerWind)
                 {
-                    try { changed += TryZeroPlanetWind(entityManager, broadcast); }
-                    catch (Exception ex) { Plugin.LogSource.LogWarning("No Wind apply failed: " + ex.Message); }
+                    // TODO: TryZeroPlanetWind path is broken; disabled until rewired.
+                    if (!_noWindNotImplementedLogged)
+                    {
+                        _noWindNotImplementedLogged = true;
+                        Plugin.LogSource.LogWarning("No Wind: feature is a placeholder and currently does nothing.");
+                    }
                 }
 
                 if (_noStatic)
@@ -2031,11 +2144,13 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
         out object? entityManager,
         out object? buffer,
         out MethodInfo? bufferAdd,
+        out Type? bufferElementType,
         out string? worldName)
     {
         entityManager = null;
         buffer = null;
         bufferAdd = null;
+        bufferElementType = null;
         worldName = null;
 
         var ncSingletonType = FindType("Netcore+Singleton") ?? FindType("Netcore.Singleton") ?? FindType("Netcore/Singleton");
@@ -2092,13 +2207,17 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
                 continue;
 
             var resolvedAdd = resolvedBuffer.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public)
-                .FirstOrDefault(m => m.Name == "Add" && m.GetParameters().Length == 1 && m.GetParameters()[0].ParameterType == wrapperType);
+                .FirstOrDefault(m => m.Name == "Add" && m.GetParameters().Length == 1);
             if (resolvedAdd == null)
                 continue;
 
             entityManager = em;
             buffer = resolvedBuffer;
             bufferAdd = resolvedAdd;
+            var resolvedElementType = resolvedAdd.GetParameters()[0].ParameterType;
+            if (resolvedElementType.IsByRef)
+                resolvedElementType = resolvedElementType.GetElementType() ?? resolvedElementType;
+            bufferElementType = resolvedElementType;
             worldName = name;
             return true;
         }
@@ -2121,7 +2240,7 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
 
     private bool RefreshAvailabilityUiAndCore(bool updateStatus)
     {
-        var coreRefreshed = RefreshCoreAvailabilityMaps();
+        var coreRefreshed = RefreshCoreAvailabilityMaps(forceBroadcast: true);
 
         if (updateStatus)
         {
@@ -2134,23 +2253,50 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
         return coreRefreshed;
     }
 
-    private bool RefreshCoreAvailabilityMaps()
+    [HideFromIl2Cpp]
+    internal static void NotifyComponentAvailabilityMayHaveChanged()
+    {
+        _instance?.TryRefreshAvailabilityAfterComponentAction();
+    }
+
+    [HideFromIl2Cpp]
+    private void TryRefreshAvailabilityAfterComponentAction()
+    {
+        var now = Time.unscaledTime;
+        if (now < _nextPlacementAvailabilityRefreshAt)
+            return;
+
+        _nextPlacementAvailabilityRefreshAt = now + 0.2f;
+        if (RefreshCoreAvailabilityMaps(forceBroadcast: true))
+        {
+            _fastBroadcastWindowEndsAt = now + 6f;
+            ScheduleAvailabilityReplayBurst(8);
+        }
+    }
+
+    private bool RefreshCoreAvailabilityMaps(bool forceBroadcast = false)
     {
         var core = GetCoreInstance();
         if (core == null)
             return false;
 
-        SetCoreComponentAmountsUnlimited(core);
+        var stampedBefore = SetCoreComponentAmountsUnlimited(core);
         var coreType = core.GetType();
         var refreshed = false;
 
         refreshed |= TryInvokeNoArgs(core, coreType, "RefreshSharedAvailableComponents");
         refreshed |= TryInvokeNoArgs(core, coreType, "RefreshPrivateAvailableComponents");
-        SetCoreComponentAmountsUnlimited(core);
+        var stampedAfter = SetCoreComponentAmountsUnlimited(core);
+        var coreReady = Math.Max(stampedBefore, stampedAfter) > 0;
 
-        TryBroadcastUnlimitedAvailability(core);
-        ScheduleAvailabilityReplayBurst(6);
-        return refreshed;
+        if (coreReady && (forceBroadcast || _lastPlayerCount > 1))
+        {
+            TryBroadcastUnlimitedAvailability(core);
+            _fastBroadcastWindowEndsAt = Time.unscaledTime + 8f;
+            ScheduleAvailabilityReplayBurst(12);
+        }
+
+        return refreshed && coreReady;
     }
 
     [HideFromIl2Cpp]
@@ -2166,43 +2312,12 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
     private void TryProcessAvailabilityReplay()
     {
         var now = Time.unscaledTime;
-        if (now >= _nextClientProbeAt)
-        {
-            _nextClientProbeAt = now + 0.5f;
-            var online = TryCountOnlineNetcoreClients();
-            if (online >= 0 && online != _lastOnlineClientCount)
-            {
-                var previous = _lastOnlineClientCount;
-                _lastOnlineClientCount = online;
-
-                if (online > 0 && online > Math.Max(0, previous))
-                {
-                    // Skicka direkt så ny klients UI hinner före första burst (första invite buggen).
-                    try
-                    {
-                        var core = GetCoreInstance();
-                        if (core != null)
-                        {
-                            SetCoreComponentAmountsUnlimited(core);
-                            TryBroadcastUnlimitedAvailability(core);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Plugin.LogSource.LogWarning("Immediate cap broadcast on count up failed: " + ex.Message);
-                    }
-
-                    ScheduleAvailabilityReplayBurst(previous < 0 ? 8 : 6);
-                    _nextAvailabilityHeartbeatAt = now + 4f;
-                    Plugin.LogSource.LogInfo($"Co-op cap replay scheduled after Netcore client count changed {previous}->{online}.");
-                }
-            }
-        }
 
         if (_pendingAvailabilityReplays <= 0 || now < _nextAvailabilityReplayAt)
             return;
 
-        _nextAvailabilityReplayAt = now + 2f;
+        var replayInterval = (now < _fastBroadcastWindowEndsAt) ? 0.5f : 2f;
+        _nextAvailabilityReplayAt = now + replayInterval;
         if (TryReplayUnlimitedAvailability())
             _pendingAvailabilityReplays--;
         else
@@ -2217,7 +2332,8 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
             return false;
 
         SetCoreComponentAmountsUnlimited(core);
-        TryBroadcastUnlimitedAvailability(core, precedeWithClear: false);
+        if (_lastPlayerCount > 1)
+            TryBroadcastUnlimitedAvailability(core, precedeWithClear: false);
         return true;
     }
 
@@ -2240,7 +2356,7 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
                 return;
             }
 
-            if (!TryGetServerNetcoreNewEventBuffer(newEventType, "BroadcastAvail", out _, out var buffer, out var bufferAdd, out var worldName) ||
+            if (!TryGetServerNetcoreNewEventBuffer(newEventType, "BroadcastAvail", out _, out var buffer, out var bufferAdd, out var wrapperElementType, out var worldName) ||
                 buffer == null || bufferAdd == null)
                 return;
 
@@ -2283,13 +2399,14 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
                 if (netcoreEvent == null)
                     continue;
 
-                var newEvent = Activator.CreateInstance(newEventType);
+                var wrapperRuntimeType = wrapperElementType ?? newEventType;
+                var newEvent = Activator.CreateInstance(wrapperRuntimeType);
                 if (newEvent == null)
                     continue;
 
-                if (!SetMemberValue(newEvent, newEventType, "_event", netcoreEvent))
+                if (!SetMemberValue(newEvent, wrapperRuntimeType, "_event", netcoreEvent))
                     continue;
-                SetMemberValue(newEvent, newEventType, "_sortValue", 0);
+                SetMemberValue(newEvent, wrapperRuntimeType, "_sortValue", 0);
 
                 bufferAdd.Invoke(buffer, new[] { newEvent });
                 sent++;
@@ -2387,24 +2504,32 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
         }
     }
 
-    internal static void SetCoreComponentAmountsUnlimited(object coreInstance)
+    internal static int SetCoreComponentAmountsUnlimited(object coreInstance)
     {
         try
         {
             var coreType = coreInstance.GetType();
             var componentsMap = GetMemberValue(coreInstance, coreType, "_componentsMap");
             if (componentsMap == null)
-                return;
+                return 0;
+
+            var updated = 0;
 
             foreach (var value in EnumerateDictionaryValues(componentsMap))
             {
                 if (value != null)
+                {
                     TrySetAvailableAmount(value, value.GetType(), UnlimitedAvailableAmount);
+                    updated++;
+                }
             }
+
+            return updated;
         }
         catch (Exception ex)
         {
             Plugin.LogSource.LogWarning("Failed to update Core._componentsMap caps: " + ex.Message);
+            return 0;
         }
     }
 
@@ -2643,29 +2768,6 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
         finally
         {
             TryDisposeNativeCollection(source);
-        }
-    }
-
-    [HideFromIl2Cpp]
-    private void TryCoopAvailabilityHeartbeat(float now)
-    {
-        if (now < _nextAvailabilityHeartbeatAt)
-            return;
-
-        _nextAvailabilityHeartbeatAt = now + 8f;
-        if (_lastOnlineClientCount <= 0 && _lastPlayerCount <= 1)
-            return;
-
-        try
-        {
-            var core = GetCoreInstance();
-            if (core != null)
-                SetCoreComponentAmountsUnlimited(core);
-            ScheduleAvailabilityReplayBurst(6);
-        }
-        catch (Exception ex)
-        {
-            Plugin.LogSource.LogWarning("Co-op cap heartbeat failed: " + ex.Message);
         }
     }
 
@@ -2998,6 +3100,91 @@ internal static class ComponentAmountPatch
     }
 }
 
+internal static class GarageGrabberAvailabilityRefreshPatch
+{
+    internal static IEnumerable<MethodBase> ResolveTargets()
+    {
+        var type = ModestMenuBehaviour.FindType("GarageGrabber");
+        if (type == null)
+            yield break;
+
+        var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        var names = new[] { "MountCurrentHandComponent", "DestroyCurrentHandComponent", "DestroyMountedComponent" };
+
+        foreach (var name in names)
+        {
+            var method = type.GetMethod(name, flags);
+            if (method != null)
+                yield return method;
+        }
+    }
+
+    internal static void Postfix()
+    {
+        ModestMenuBehaviour.NotifyComponentAvailabilityMayHaveChanged();
+    }
+}
+
+internal static class UIInventorySetAvailablePatch
+{
+    internal static MethodBase? ResolveTarget()
+    {
+        var type = ModestMenuBehaviour.FindType("UIInventoryListItem");
+        if (type == null)
+            return null;
+
+        return AccessTools.Method(type, "SetAvailableComponents");
+    }
+
+    internal static void Prefix(object[] __args)
+    {
+        if (__args.Length == 0)
+            return;
+        __args[0] = ModestMenuBehaviour.UnlimitedAvailableAmount;
+    }
+}
+
+internal static class UIInventoryAvailabilityColorPatch
+{
+    internal static IEnumerable<MethodBase> ResolveTargets()
+    {
+        var type = ModestMenuBehaviour.FindType("UIInventoryListItem");
+        if (type == null)
+            yield break;
+
+        var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        var names = new[] { "SetAvailableComponents", "UpdateBgColor", "SetInventoryComponent" };
+
+        foreach (var name in names)
+        {
+            var method = type.GetMethod(name, flags);
+            if (method != null)
+                yield return method;
+        }
+    }
+
+    internal static void Postfix(object __instance)
+    {
+        try
+        {
+            var itemType = __instance.GetType();
+            ModestMenuBehaviour.SetMemberValue(__instance, itemType, "_currentTextAvailableComponents", ModestMenuBehaviour.UnlimitedAvailableAmount);
+
+            var textAmount = ModestMenuBehaviour.GetMemberValue(__instance, itemType, "_textAmount");
+            if (textAmount != null)
+            {
+                ModestMenuBehaviour.SetMemberValue(textAmount, textAmount.GetType(), "text", ModestMenuBehaviour.UnlimitedAvailableAmount.ToString());
+                var goodColor = ModestMenuBehaviour.GetMemberValue(__instance, itemType, "_amountTextColorGood");
+                if (goodColor != null)
+                    ModestMenuBehaviour.SetMemberValue(textAmount, textAmount.GetType(), "color", goodColor);
+            }
+        }
+        catch
+        {
+        }
+    }
+}
+
 internal static class SpaceshipCreationPatch
 {
     private const int LimitOverflowFlag = 8;
@@ -3082,7 +3269,6 @@ internal static class CoreAvailabilityRefreshPatch
     internal static void Postfix(object __instance)
     {
         ModestMenuBehaviour.SetCoreComponentAmountsUnlimited(__instance);
-        ModestMenuBehaviour.TryBroadcastUnlimitedAvailability(__instance);
     }
 }
 
