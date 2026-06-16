@@ -21,7 +21,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.wooldrum.modestmenu";
     public const string PluginName = "Wooldrum's Modest Menu";
-    public const string PluginVersion = "0.0.2";
+    public const string PluginVersion = "1.0.0";
 
     internal static ManualLogSource LogSource = null!;
 
@@ -211,8 +211,6 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
     private float _nextPlayerScanAt;
     private float _nextCoreStampAt;
     private float _nextPlacementAvailabilityRefreshAt;
-    // R is held to load into a world. ScanItems stamps every world instance, which is what
-    // makes the refresh actually stick (without it, the cap snaps back to red on placement).
     private float _rHoldStartedAt;
     private float _rHoldScanScheduledAt;
     private float _rHoldRefreshScheduledAt;
@@ -224,14 +222,10 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
     private int _toggleApplyFailures;
     private float _toggleCooldownUntil;
     private bool _noPlayerWind;
-    // "No static" bortplockad — gäster räknar GPU-sidan själva. Toggle → TryApplyNoStatic när du orkar.
     private bool _noStatic;
     private bool _noStaticNotImplementedLogged;
-    // No Wind is a TODO; host-only ECS write doesn't propagate to guests.
     private bool _noWindNotImplementedLogged;
 
-    // After a guest joins, we replay broadcasts at ~0.5 s for a few seconds — covers the join
-    // handshake race where the first broadcast lands before the client is ready.
     private float _fastBroadcastWindowEndsAt;
 
     private static MethodInfo? _findObjectsOfTypeAll;
@@ -245,7 +239,6 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
         ["EPC_SCFloodlight"] = "Spotlight / Floodlight",
         ["EPC_SpotLight"] = "Spotlight",
     };
-    /// IL2CPP: <see cref="GUIContent.none"/> finns inte alltid.
     private static readonly GUIContent EmptyGroupContent = new GUIContent("");
 
     private void Awake()
@@ -304,7 +297,6 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
 
         if (now >= _nextPlayerFeatureApplyAt && now >= _toggleCooldownUntil)
         {
-            // 1 Hz räcker; oftare = hitch (query + sync varje gång).
             _nextPlayerFeatureApplyAt = now + 1f;
             ApplyToggleSafelyFromUpdate();
         }
@@ -331,8 +323,6 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
             var newCount = TryCountPlayers();
             _lastPlayerCount = newCount;
 
-            // Guest joined — open the dense-replay window. Host's own world-entry refresh is
-            // handled by the R-hold trigger.
             if (newCount > Math.Max(0, prevCount) && newCount > 1)
             {
                 Plugin.LogSource.LogInfo($"Player count rose ({prevCount}->{newCount}); opening co-op fast-broadcast window.");
@@ -359,7 +349,6 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
             {
                 Plugin.LogSource.LogInfo("R-hold scan timer fired; running ScanItems.");
                 ScanItems();
-                // Suppress the F8 first-open scan so the menu doesn't hitch.
                 _initialOpenScansDone = true;
             }
             catch (Exception ex)
@@ -384,7 +373,6 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
             return;
         }
 
-        // Once armed, stop polling R until the timers fire.
         if (_rHoldRefreshScheduledAt > 0f)
             return;
 
@@ -523,14 +511,12 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
 
             if (_scanTab == 1)
             {
-                // World: TP = dra befintlig entity till dig.
                 var tpRect = new Rect(2f, currentY, 60f, 22f);
                 if (GUI.Button(tpRect, "TP"))
                     TeleportWorldTypeToPlayer(item, _teleportCount);
             }
             else
             {
-                // Garage: Put In Slot = ship-del i vald hotbar-ruta.
                 var actionRect = new Rect(2f, currentY, 92f, 22f);
                 if (item.IsSpaceshipComponent && !item.IsTypeOnly && GUI.Button(actionRect, "Put In Slot"))
                     SetHandSlot(item);
@@ -557,7 +543,6 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
     {
         var changedToggle = false;
         changedToggle |= UpdateToggle(new Rect(x + 14, featureRowY, 160, 24), ref _noPlayerWind, "No Wind (TODO)");
-        // No static TODO — bara stub, se TryApplyNoStatic.
         changedToggle |= UpdateToggle(new Rect(x + 184, featureRowY, 170, 24), ref _noStatic, "No Static (TODO)");
 
         if (changedToggle)
@@ -1098,7 +1083,6 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
     [HideFromIl2Cpp]
     private static string? GuessEcsMarkerComponentName(Type worldType)
     {
-        // Guess: EPC_Foo → FooData
         var n = worldType.Name ?? "";
         if (n.StartsWith("EPC_", StringComparison.Ordinal))
             return n.Substring(4) + "Data";
@@ -1219,7 +1203,6 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
         return null;
     }
 
-    /// World pos → parent-local float3 (måste ha Parent).
     [HideFromIl2Cpp]
     private static bool TryConvertWorldPointToParentLocalSpace(
         object entityManager,
@@ -1363,7 +1346,6 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
             return 0;
         }
 
-        // EntityQuery > GetAllEntities (signaturer skiljer sig mellan Entities-versioner).
         var componentTypeType = FindType("Unity.Entities.ComponentType") ?? FindType("ComponentType");
         if (componentTypeType == null)
         {
@@ -1431,7 +1413,6 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
         {
             var paramType = toEntityArray.GetParameters()[0].ParameterType;
             object allocatorArg = tempAllocator;
-            // Nyare Entities: Allocator → AllocatorHandle implicit.
             if (paramType.FullName != null && paramType.FullName.Contains("AllocatorManager+AllocatorHandle"))
                 allocatorArg = CreateAllocatorHandleFromAllocator(tempAllocator, paramType) ?? tempAllocator;
 
@@ -1690,7 +1671,7 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
                     }
                     catch
                     {
-                        /* fallbacks nästa */
+
                     }
                 }
             }
@@ -1719,7 +1700,6 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
             }
             catch
             {
-                // strunta i per-entity fel
             }
         }
 
@@ -1759,7 +1739,6 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
         if (worlds.Count == 0)
             return null;
 
-        // Host har ofta flera Worlds — server-world först.
         foreach (var world in worlds)
         {
             var name = TryGetWorldName(worldType, world);
@@ -1920,13 +1899,12 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
         {
             foreach (var (entityManager, _) in EnumerateEntityManagers(serverFirst: true))
             {
-                // Bara skriv på server-world; client mirrors = desync / crash.
+                // server world only; writing a client mirror desyncs
                 if (ncSingletonType != null && !IsServerEntityManager(entityManager, ncSingletonType))
                     continue;
 
                 if (_noPlayerWind)
                 {
-                    // TODO: TryZeroPlanetWind path is broken; disabled until rewired.
                     if (!_noWindNotImplementedLogged)
                     {
                         _noWindNotImplementedLogged = true;
@@ -1940,7 +1918,6 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
                     catch (Exception ex) { Plugin.LogSource.LogWarning("No Static apply failed: " + ex.Message); }
                 }
 
-                // Hittade server world, stoppa sök.
                 break;
             }
         }
@@ -1952,11 +1929,9 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
         return changed;
     }
 
-    /// No static: avstängd (gäst-GPU). Loggar en gång. Riktig lösning = client-mod eller net-hooks.
     [HideFromIl2Cpp]
     private int TryApplyNoStatic(object entityManager, bool broadcast)
     {
-        // TODO: kod — lämna signatur så UI/apply fortsätter lira.
         if (!_noStaticNotImplementedLogged)
         {
             _noStaticNotImplementedLogged = true;
@@ -2337,7 +2312,6 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
         return true;
     }
 
-    /// Server: SetAvailableComponent 999999 + refresh för varje SCPrefab till alla. Client: noop.
     [HideFromIl2Cpp]
     internal static void TryBroadcastUnlimitedAvailability(object core, bool precedeWithClear = false)
     {
@@ -2365,7 +2339,7 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
             if (createGeneric == null)
                 return;
             var createForSetAvail = createGeneric.MakeGenericMethod(setAvailEventType);
-            _ = precedeWithClear; // Legacy arg — clear aldrig klient-map mitt i session.
+            _ = precedeWithClear;
 
             var componentsMap = GetMemberValue(core, core.GetType(), "_componentsMap");
             if (componentsMap == null)
@@ -2609,7 +2583,6 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
         }
         finally
         {
-            // Dispose queries — leak = långsamt död.
             TryDisposeEntityQuery(query);
         }
     }
@@ -2626,7 +2599,6 @@ public sealed class ModestMenuBehaviour : MonoBehaviour
         }
         catch
         {
-            // Dispose best effort; vissa builds = struct ref, reflection strular.
         }
     }
 

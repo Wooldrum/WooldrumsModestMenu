@@ -23,6 +23,7 @@ Desktop.ini
 *.log
 *.tmp
 *.temp
+_held_plugin.dll
 
 # NuGet (if ever used at root)
 packages/

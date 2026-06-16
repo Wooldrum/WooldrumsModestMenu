@@ -1,0 +1,8 @@
+BepInEx 6 (IL2CPP, build be.764) is bundled here for one-click install.
+
+BepInEx is (c) BepInEx contributors, licensed under LGPL-2.1.
+Source and license: https://github.com/BepInEx/BepInEx
+
+The bundled BepInEx.cfg has two non-default settings:
+  - UnhollowerDeobfuscationRegex = ^<>.+$   (fixes a Unity 6 interop dup-type crash)
+  - [Logging.Console] Enabled = false       (avoids the console QuickEdit pause-on-click)

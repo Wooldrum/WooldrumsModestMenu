@@ -1,14 +1,14 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>netstandard2.1</TargetFramework>
+    <!-- net6.0 to match BepInEx's CoreCLR runtime -->
+    <TargetFramework>net6.0</TargetFramework>
     <Nullable>enable</Nullable>
     <AssemblyName>WooldrumsModestMenu</AssemblyName>
     <RootNamespace>WooldrumsModestMenu</RootNamespace>
     <LangVersion>latest</LangVersion>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
-    <!-- BepInEx kör .NET 6 i spelet; vi bygger netstandard2.1 för kompat. -->
-    <NoWarn>$(NoWarn);MSB3277</NoWarn>
+    <NoWarn>$(NoWarn);MSB3277;CA2255</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -26,6 +26,20 @@
     </Reference>
     <Reference Include="Il2CppInterop.Runtime">
       <HintPath>..\..\refs\bepinex-core\Il2CppInterop.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppInterop.Common">
+      <HintPath>..\..\refs\bepinex-core\Il2CppInterop.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2Cppmscorlib">
+      <HintPath>..\..\refs\game-dummy\Il2Cppmscorlib.dll</HintPath>
+      <!-- aliased so its NullableAttribute stub doesn't clash (CS0656) -->
+      <Aliases>il2cppmscorlib</Aliases>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppSystem">
+      <HintPath>..\..\refs\game-dummy\Il2CppSystem.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.CoreModule">
