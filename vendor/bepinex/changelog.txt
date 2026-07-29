@@ -1,6 +1,22 @@
-55 changes since v6.0.0-pre.2
+71 changes since v6.0.0-pre.2
 
 Changelog (excluding merge commits):
+* (6abdba4) [ManlyMarco] Revert Cpp2IL back to development.1452 because of regressions
+* (0523d6f) [ManlyMarco] Downgrade Samboy063.Cpp2IL.Core to 2022.1.0-pre-release.20
+* (c58c42d) [ManlyMarco] build_pr.yml - Also run on v5-lts branch
+* (ac4f64a) [ManlyMarco] comment_pr.yml - Fix not working on PRs from forks
+* (80dde08) [ManlyMarco] Bump Cpp2IL to 2022.1.0.21 and AssetRipper.Primitives to 3.2.0 (#1362)
+* (0643c2b) [ManlyMarco] Bump Il2CppInterop to 1.5.3 (#1361)
+* (4aab292) [ManlyMarco] Make UnityInput and KeyboardShortcut available in IL2CPP (#998)
+* (4a879f5) [HetCreep] Hash the full UTF-8 byte length in HashStrings (#1355)
+* (fb5f191) [HetCreep] Enumerate a config snapshot under the lock (#1357)
+* (32fb12f) [HetCreep] Remove the duplicate byte TomlTypeConverter registration (#1359)
+* (5f39645) [HetCreep] Allow multiple [TargetType] and [TargetAssembly] attributes (#1343)
+* (da64b22) [HetCreep] Do not abort startup when the config file cannot be written (#1340)
+* (bd467c9) [js6pak] Expose a DisplayBepInExVersion (#556)
+* (a06688e) [HetCreep] Degrade instead of crashing when the IL2CPP interop assemblies are missing (#1338)
+* (a1afbfb) [HetCreep] Skip missing search directories to fix preloader DirectoryNotFoundException (#1331)
+* (9aedb90) [はやしうめ] Set the console codepage to ensure correct text display regardless of encoding (#1337)
 * (f568f0e) [HetCreep] Fix misleading error label for Finished handlers (#1329)
 * (77d438c) [HetCreep] Clarify BepInDependency version errors and docs (#1330)
 * (f8ba0a4) [HetCreep] Give actionable error when base-libs download fails (#1332)

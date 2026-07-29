@@ -1,4 +1,4 @@
-BepInEx 6 (IL2CPP, build be.764) is bundled here for one-click install.
+BepInEx 6 (IL2CPP, build be.785) is bundled here for one-click install.
 
 BepInEx is (c) BepInEx contributors, licensed under LGPL-2.1.
 Source and license: https://github.com/BepInEx/BepInEx

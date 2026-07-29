@@ -21,7 +21,7 @@ if (-not (Test-Path $plugin)) {
     throw "Build did not produce: $plugin"
 }
 
-# --- Install / update BepInEx 6 (be.764) ---
+# --- Install / update BepInEx 6 (be.785) ---
 $bep = Join-Path $GameDir "BepInEx"
 New-Item -ItemType Directory -Force $bep | Out-Null
 
@@ -29,6 +29,15 @@ foreach ($f in @("winhttp.dll", "doorstop_config.ini", ".doorstop_version", "cha
     $src = Join-Path $bundle $f
     if (Test-Path $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $GameDir $f) -Force }
 }
+
+# CoreCLR runtime required by Doorstop for IL2CPP (dotnet\coreclr.dll).
+$dotnetSrc = Join-Path $bundle "dotnet"
+$dotnetDst = Join-Path $GameDir "dotnet"
+if (-not (Test-Path $dotnetSrc)) {
+    throw "Bundled CoreCLR runtime missing: $dotnetSrc"
+}
+if (Test-Path $dotnetDst) { Remove-Item -LiteralPath $dotnetDst -Recurse -Force }
+Copy-Item -LiteralPath $dotnetSrc -Destination $dotnetDst -Recurse -Force
 
 $coreDst = Join-Path $bep "core"
 if (Test-Path $coreDst) { Remove-Item -LiteralPath $coreDst -Recurse -Force }
